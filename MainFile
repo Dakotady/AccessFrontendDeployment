@@ -1,0 +1,246 @@
+Option Explicit
+
+Dim wshNetwork, strUsr, strNetPath, strUsrPath, strBE, strFE, strFEaccdb, strICO, strLinkName, objFSO, objShell, objLink, strFullUsrPath, sNetLocn, sNetLocnDesc, sUsrPathDesc, strLogSuffix, is64bit, sAppVersion, sTargetPath
+Const forAppnd = 8 'read = 1; write = 2'
+
+
+readySetGo
+
+
+Private Sub setVariables()
+  strBE = ***** BackEnd location
+  strFE = *****Frontend record file
+  strFEaccdb = *****FontEnd name
+  strICO = *****.ICO file Name
+  strLinkName = ****ShortCut Name
+  sNetLocn = ****ServerLocation
+  strNetPath = sNetLocn + ****FolderPath
+  strUsrPath = *****UsersHardDrive
+  sNetLocnDesc = *****File name
+  sUsrPathDesc = ****ShortCut Name
+  strLogSuffix = ****AccessLog
+  strBE = strNetPath & strBE
+
+  Set wshNetwork = CreateObject("WScript.Network")
+  strUsr = wshNetwork.UserName
+  Set wshNetwork = Nothing
+
+  Set objFSO = CreateObject("Scripting.FileSystemObject")
+  Set objShell = CreateObject("Wscript.Shell")
+
+  setIs64bit 'also sets sTargetPath
+  sAppVersion = accessVersion
+
+  '******dev/testing use:
+  'MsgBox "is64bit: " & is64bit
+  'is64bit = TRUE
+  'MsgBox "is64bit: " & is64bit
+  'MsgBox "sAppVersion: " & sAppVersion
+  'sAppVersion = 16
+  'MsgBox "sAppVersion: " & sAppVersion
+End Sub
+
+
+Private Sub readySetGo()
+  setVariables
+
+  trustLocations
+
+  If objFSO.FileExists(strBE) And objFSO.FileExists(strNetPath & strFE) Then
+    'appendUserLog
+    handleUsrFolder
+
+    buildShortcut
+    createDesktopShortcut
+
+    objShell.Run Chr(34) & strUsrPath & strLinkName & ".lnk" & Chr(34)
+'    objShell.Run strFullUsrPath & ".lnk", 0, TRUE
+
+    set objShell = Nothing
+  Else
+    displayMsg
+  End If
+
+  Set objFSO = Nothing
+End Sub
+
+
+Private Sub setIs64bit()
+  Dim sKey, blnRtn
+
+  blnRtn = FALSE
+
+  sKey = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\MSACCESS.EXE\Path"
+  sTargetPath = objShell.RegRead(sKey) & "MSACCESS.EXE"
+
+  blnRtn = InStr(sTargetPath, "x86") = 0 '32-bit installations are most often in C:\Program Files (x86)\
+                                         '64-bit installations will be in C:\Program Files\
+  is64bit = blnRtn
+End Sub
+
+
+Private Sub trustLocations()
+  Dim oReg, sKey
+  Const HKEY_CURRENT_USER = &H80000001
+
+  Set oReg = GetObject("winmgmts:{impersonationLevel=impersonate}//./root/default:StdRegProv")
+  sKey = "SOFTWARE\Microsoft\Office\" & sAppVersion & ".0\Access\Security\Trusted Locations"
+
+  oReg.SetDWORDValue HKEY_CURRENT_USER, sKey, "AllowNetworkLocations", 1
+
+  handleThisLocation oReg, HKEY_CURRENT_USER, sKey, sNetLocn, sNetLocnDesc
+  handleThisLocation oReg, HKEY_CURRENT_USER, sKey, strUsrPath, sUsrPathDesc
+End Sub
+
+
+Private Sub handleThisLocation(oReg, sHive, sKey, sLocation, sDescription)
+  Dim iLocationCount, arrSubKeys, sValue, bExists, sNewKey, sSubKey
+
+  bExists = False
+  iLocationCount = 0
+
+  oReg.EnumKey sHive, sKey, arrSubKeys
+
+  For Each sSubKey in arrSubKeys
+    oReg.GetStringValue sHive, sKey & "\" & sSubKey, "Path", sValue
+    If Not bExists Then bExists = sValue = sLocation
+    If CInt(Mid(sSubKey, 9)) > iLocationCount Then iLocationCount = Cint(Mid(sSubKey, 9))
+  Next
+
+  If Not bExists Then
+    sNewKey = sKey & "\Location" & CStr(iLocationCount + 1)
+    
+    oReg.CreateKey sHive, sNewKey
+    oReg.SetStringValue sHive, sNewKey, "Path", sLocation
+    oReg.SetStringValue sHive, sNewKey, "Description", sDescription
+    oReg.SetDWORDValue sHive, sNewKey, "AllowSubFolders", 1
+  End If
+End Sub
+
+
+Private Function accessVersion()
+  Dim oReg, sKey, sValue, sVersion
+  Const HKEY_CLASSES_ROOT = &H80000000
+ 
+  Set oReg = GetObject("winmgmts:{impersonationLevel=impersonate}//./root/default:StdRegProv")
+  sKey = "Access.Application\CurVer"
+  oReg.GetStringValue HKEY_CLASSES_ROOT, sKey, "", sValue
+  sVersion = Right(sValue, Len(sValue) - InStrRev(sValue, "."))
+
+  Set oReg = Nothing
+
+  accessVersion = sVersion
+End Function
+
+
+Private Sub appendUserLog()
+  Dim objLog
+
+  Set objLog = objFSO.OpenTextFile(strNetPath & "Logs\" & strUsr & strLogSuffix, forAppnd, True)
+  objLog.WriteLine(strUsr & ", " & objShell.ExpandEnvironmentStrings("%COMPUTERNAME%") & ", " & Date() & ", " & Time())
+  objLog.Close
+  Set objLog = Nothing
+End Sub
+
+
+Private Sub handleUsrFolder()
+  If Not objFSO.FolderExists(strUsrPath) Then objFSO.CreateFolder(strUsrPath)
+  If Not objFSO.FolderExists(strUsrPath & "Icons\") Then objFSO.CreateFolder(strUsrPath & "Icons\")
+  If Not objFSO.FolderExists(strUsrPath & "Temp\") Then objFSO.CreateFolder(strUsrPath & "Temp\") 'for 64-bit issue
+  If Not objFSO.FolderExists(strUsrPath & "Reports\") Then objFSO.createfolder (strUsrPath & "Reports\")
+End Sub
+
+
+Private Function usrPCfileCpy()
+  Dim strOldName, strNewName, oApp, sTempAccdb, sTempAccde
+
+  'VTHM had 32-bit installations of Office until Office 365/Office 16.
+
+  If sAppVersion >= 16 Then
+   'Copy .accdb to temp fldr.
+    strOldName = strNetPath & strFEaccdb
+    sTempAccdb = strUsrPath & "Temp\" & strFEaccdb
+    objFSO.CopyFile strOldName, sTempAccdb, True
+
+   'Use syscmd 603 to make an .accdr in temp fldr.
+   'Syscmd 603 will silently fail and not overwrite previous .accdr in base fldr, resulting in a loop in the dbcheck code.
+    sTempAccde = Replace(sTempAccdb, ".accdb", ".accdr")
+    Set oApp = CreateObject("Access.Application")
+    oApp.SysCmd 603, CStr(sTempAccdb), CStr(sTempAccde)
+    oApp.Quit 2 'acQuitOption enumeration, acQuitSaveNone = 2
+    Set oApp = Nothing
+
+   'Use FSO to Copy new .accdr over old in base folder.
+    strOldName = sTempAccde
+    strNewName = Replace(sTempAccde, "Temp\", "")
+    strNewName = Replace(strNewName, ".", "_" & strUsr & ".")
+    objFSO.CopyFile strOldName, strNewName, True
+
+   'delete .accdb and .accdr in temp fldr.
+    objFSO.DeleteFile sTempAccdb
+    objFSO.DeleteFile sTempAccde
+  Else
+    strOldName = strNetPath & strFE
+    strNewName = strUsrPath & Replace(strFE, ".", "_" & strUsr & ".")
+    objFSO.CopyFile strOldName, strNewName, True
+  End If
+
+  usrPCfileCpy = strNewName
+End Function
+
+
+Private Sub buildShortcut()
+  strFullUsrPath = usrPCfileCpy
+
+  Set objLink = objShell.CreateShortcut(strUsrPath & strLinkName & ".lnk")
+
+
+  objLink.TargetPath = sTargetPath
+  objLink.Arguments = strFullUsrPath & " /runtime"
+  objLink.WindowStyle = 7
+  objLink.Hotkey = ""
+' Added strNetPath in the place of strUsrPath
+  objLink.IconLocation = strNetPath & "Icons\" & strICO
+  objLink.WorkingDirectory = strUsrPath
+  objLink.Save
+
+  Set objLink = Nothing
+End Sub
+
+
+Private Sub createDesktopShortcut()
+  Dim strFrom, sDesktop, sTaskbar, blnDesktopSCexists, blnTaskbarSCexists, sSecondLink, blnSecondExists
+
+  strFrom = strUsrPath & strLinkName & ".lnk"
+  sDesktop = objShell.SpecialFolders("Desktop") & "\" & strLinkName & ".lnk"
+  sTaskbar = objShell.ExpandEnvironmentStrings("%AppData%") & "\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\" & strLinkName & ".lnk"
+
+  blnDesktopSCexists = objFSO.FileExists(sDesktop)
+  blnTaskbarSCexists = objFSO.FileExists(sTaskbar)
+
+  If blnDesktopSCexists Then objFSO.CopyFile strFrom, sDesktop 'update link
+
+  If blnTaskbarSCexists Then
+    sSecondLink = Replace(sTaskbar, ".lnk", " (2).lnk")
+    blnSecondExists = objFSO.FileExists(sSecondLink)
+    If blnSecondExists Then 'an extra copy has been made.  Programming error from an earlier script made the first, user pinning to taskbar made the second.
+      objFSO.DeleteFile sTaskbar
+      objFSO.MoveFile sSecondLink, sTaskbar
+    End If
+    objFSO.CopyFile strFrom, sTaskbar 'update link
+  End If
+
+  If Not blnDesktopSCexists And Not blnTaskbarSCexists Then
+    objFSO.CopyFile strFrom, sDesktop
+    MsgBox "A shortcut to " & strLinkName & " is now on your desktop.", vbOkOnly + vbInformation, "Link Created"
+  End If
+End Sub
+
+
+Private Sub displayMsg()
+  Dim strMsg
+
+  strMsg = ***** project message if unavailable
+
+  MsgBox strMsg, vbOkOnly + vbCritical, "Error"
+End Sub
